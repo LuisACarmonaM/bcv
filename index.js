@@ -6,7 +6,7 @@ const NodeCache = require("node-cache");
 const cron = require("node-cron"); // 1. Importar node-cron
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 const cache = new NodeCache({ stdTTL: 3600 });
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
