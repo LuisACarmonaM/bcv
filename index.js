@@ -1,15 +1,32 @@
+require("dotenv").config(); // Para leer variables de entorno en local
 const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const https = require("https");
 const NodeCache = require("node-cache");
-const cron = require("node-cron"); // 1. Importar node-cron
+const cron = require("node-cron");
+const { initializeApp, cert } = require("firebase-admin/app");
+const { getMessaging } = require("firebase-admin/messaging");
+
+// 2. Inicializar Firebase de forma segura usando Variables de Entorno
+initializeApp({
+  credential: cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY
+      ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+      : undefined,
+  }),
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const cache = new NodeCache({ stdTTL: 3600 });
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+
+// 3. Variable global para recordar el último precio que notificamos
+let ultimoPrecioConocido = null;
 
 const parseRate = ($, selector) => {
   try {
@@ -65,16 +82,51 @@ cron.schedule(
     try {
       const data = await obtenerTasasDelBCV();
 
-      // Guardamos la data fresca en la caché para que la API ya la tenga lista
+      // Guardamos la data fresca en la caché
       cache.set("bcv_rates", data);
       console.log("-> Caché actualizada con éxito por la tarea programada.");
+
+      // 4. LÓGICA DE NOTIFICACIONES PUSH
+      const nuevoPrecio = data.USD;
+
+      if (
+        ultimoPrecioConocido !== null &&
+        ultimoPrecioConocido !== nuevoPrecio &&
+        nuevoPrecio > 0
+      ) {
+        console.log(
+          `¡Cambio detectado! De ${ultimoPrecioConocido} a ${nuevoPrecio}. Enviando notificaciones Push...`,
+        );
+
+        const mensaje = {
+          notification: {
+            title: "🚨 ¡Tasa del BCV Actualizada!",
+            body: `El dólar pasó de Bs. ${ultimoPrecioConocido.toFixed(2)} a Bs. ${nuevoPrecio.toFixed(2)}`,
+          },
+          topic: "actualizaciones_bcv",
+        };
+
+        await getMessaging().send(mensaje);
+        console.log(
+          "-> 🟢 Notificaciones enviadas exitosamente a los dispositivos.",
+        );
+      } else {
+        console.log(
+          "-> ⚪ Tasa sin cambios o primer inicio. No se envían notificaciones.",
+        );
+      }
+
+      // Actualizar la memoria del servidor
+      if (nuevoPrecio > 0) {
+        ultimoPrecioConocido = nuevoPrecio;
+      }
     } catch (error) {
       console.error("-> Error en la tarea programada del BCV:", error.message);
     }
   },
   {
     scheduled: true,
-    timezone: "America/Caracas", // Asegura que use estrictamente la hora de Venezuela
+    timezone: "America/Caracas",
   },
 );
 
@@ -94,6 +146,12 @@ app.get("/api/tasas-bcv", async (req, res) => {
     const data = await obtenerTasasDelBCV();
     cache.set("bcv_rates", data);
 
+    // Alimenta la variable global la primera vez que alguien consulte la API
+    // para evitar notificaciones falsas al arrancar el servidor
+    if (ultimoPrecioConocido === null && data.USD > 0) {
+      ultimoPrecioConocido = data.USD;
+    }
+
     return res.status(200).json({
       success: true,
       data: data,
@@ -109,5 +167,5 @@ app.get("/api/tasas-bcv", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor Node.js corriendo`);
+  console.log(`Servidor Node.js corriendo en el puerto ${PORT}`);
 });
